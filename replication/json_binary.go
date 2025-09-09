@@ -560,42 +560,49 @@ func (d *jsonBinaryDecoder) decodeVariableLength(data []byte) (int, int) {
 	return 0, 0
 }
 
-func (e *RowsEvent) decodeJsonPartialBinary(data []byte) (*JsonDiff, error) {
-	// see Json_diff_vector::read_binary() in mysql-server/sql/json_diff.cc
-	operationNumber := JsonDiffOperation(data[0])
-	switch operationNumber {
-	case JsonDiffOperationReplace:
-	case JsonDiffOperationInsert:
-	case JsonDiffOperationRemove:
-	default:
-		return nil, ErrCorruptedJSONDiff
+func (e *RowsEvent) decodeJsonPartialBinary(data []byte) ([]JsonDiff, error) {
+	var diffs []JsonDiff
+
+	for len(data) > 0 {
+		// see Json_diff_vector::read_binary() in mysql-server/sql/json_diff.cc
+		operationNumber := JsonDiffOperation(data[0])
+		switch operationNumber {
+		case JsonDiffOperationReplace:
+		case JsonDiffOperationInsert:
+		case JsonDiffOperationRemove:
+		default:
+			return nil, ErrCorruptedJSONDiff
+		}
+		data = data[1:]
+
+		pathLength, _, n := mysql.LengthEncodedInt(data)
+		data = data[n:]
+
+		path := data[:pathLength]
+		data = data[pathLength:]
+
+		if operationNumber == JsonDiffOperationRemove {
+			diffs = append(diffs, JsonDiff{
+				Op:   operationNumber,
+				Path: string(path),
+			})
+			continue
+		}
+
+		valueLength, _, n := mysql.LengthEncodedInt(data)
+		data = data[n:]
+
+		d, err := e.decodeJsonBinary(data[:valueLength])
+		if err != nil {
+			return nil, fmt.Errorf("cannot read json diff for field %q: %w", path, err)
+		}
+		data = data[valueLength:]
+		diffs = append(diffs, JsonDiff{
+			Op:    operationNumber,
+			Path:  string(path),
+			Value: string(d),
+		})
 	}
-	data = data[1:]
 
-	pathLength, _, n := mysql.LengthEncodedInt(data)
-	data = data[n:]
-
-	path := data[:pathLength]
-	data = data[pathLength:]
-
-	diff := &JsonDiff{
-		Op:   operationNumber,
-		Path: string(path),
-		// Value will be filled below
-	}
-
-	if operationNumber == JsonDiffOperationRemove {
-		return diff, nil
-	}
-
-	valueLength, _, n := mysql.LengthEncodedInt(data)
-	data = data[n:]
-
-	d, err := e.decodeJsonBinary(data[:valueLength])
-	if err != nil {
-		return nil, fmt.Errorf("cannot read json diff for field %q: %w", path, err)
-	}
-	diff.Value = string(d)
-
-	return diff, nil
+	return diffs, nil
 }
